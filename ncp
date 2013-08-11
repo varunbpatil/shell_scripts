@@ -1,0 +1,95 @@
+#!/bin/bash
+#
+# shell script to make netcat+tar file transfer similar to scp
+
+printUsage()
+{
+cat <<EOF
+Usage : `basename $0` <src_file_or_dir> <user@ip_addr:destination_dir> <enable_compression 0/1>
+EOF
+}
+
+if [ $# -ne 3 ]; then
+    printUsage
+    exit 1
+else
+    src=$1
+    user=$(echo $2 | awk -F'@' '{print $1}')
+    ip=$(echo $2 | awk -F'@' '{print $2}' | awk -F':' '{print $1}')
+    dest=$(echo $2 | awk -F'@' '{print $2}' | awk -F':' '{print $2}')
+    enable_compression=$3
+fi
+
+# sanity checks
+echo "sanity checks in progress..."
+
+ping -c 1 -w 10 $ip &>/dev/null
+if [ $? -ne 0 ]; then
+    echo "ERROR : cannot connect to $ip"
+    exit 1
+fi
+
+which pv &>/dev/null
+if [ $? -ne 0 ]; then
+    echo "ERROR : please install 'pv' on src before using this script"
+    exit 1
+fi
+
+ssh $user@$ip 'which screen' &>/dev/null
+if [ $? -ne 0 ]; then
+    echo "ERROR : please install 'screen' on destination before using this script"
+    exit 1
+fi
+
+if [[ (! -d $src) && (! -f $src) ]]; then
+    echo "ERROR : $src : no such file or directory"
+    exit 1
+fi
+
+ssh $user@$ip "ls $dest" &>/dev/null
+if [ $? -ne 0 ]; then
+    ssh $user@$ip "mkdir -p $dest" &>/dev/null
+    if [ $? -ne 0 ]; then
+        echo "unable to create directory $dest at destination"
+        exit 1
+    fi
+    echo "created directory $dest"
+fi
+echo "sanity checks complete..."
+
+# start netcat at destination
+if [ $enable_compression -eq 0 ]; then
+    echo "nc -l -p 12345 | tar xf - -C $dest" > /tmp/nct.sh
+    scp /tmp/nct.sh $user@$ip:/tmp/ &>/dev/null
+    ssh -f $user@$ip "screen -dm -S netcat sh /tmp/nct.sh"
+else
+    echo "nc -l -p 12345 | tar xzf - -C $dest" > /tmp/nct.sh
+    scp /tmp/nct.sh $user@$ip:/tmp/ &>/dev/null
+    ssh -f $user@$ip "screen -dm -S netcat sh /tmp/nct.sh"
+fi
+
+if [ $? -ne 0 ]; then
+    echo "ERROR : unable to start netcat at destination"
+    exit 1
+fi
+echo "started netcat at destination"
+sleep 2
+
+# transfer data
+echo "data transfer in progress..."
+dn=$(dirname "$src")
+bn=$(basename "$src")
+cd "$dn"
+
+if [ $enable_compression -eq 0 ]; then
+    tar cf - "$bn" | pv -s $(du -sb "$bn" | awk '{print $1}') | nc $ip 12345 &>/dev/null
+else
+    tar czf - "$bn" | pv -s $(du -sb "$bn" | awk '{print $1}') | nc $ip 12345 &>/dev/null
+fi
+
+if [ $? -ne 0 ]; then
+    echo "ERROR : something went wrong at src"
+    ssh $user@$ip "killall nc; killall screen; killall tar" &>/dev/null
+    exit 1
+fi
+echo "data transfer completed..."
