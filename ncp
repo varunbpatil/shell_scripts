@@ -5,19 +5,25 @@
 printUsage()
 {
 cat <<EOF
-Usage : `basename $0` <src_file_or_dir> <user@ip_addr:destination_dir> <enable_compression 0/1>
+Usage : `basename $0` [SRC_FILES...] [user@ip_addr:destination_dir] [disable or enable compression (0/1)]
 EOF
 }
 
-if [ $# -ne 3 ]; then
+if [ $# -lt 3 ]; then
     printUsage
     exit 1
 else
-    src=$1
-    user=$(echo $2 | awk -F'@' '{print $1}')
-    ip=$(echo $2 | awk -F'@' '{print $2}' | awk -F':' '{print $1}')
-    dest=$(echo $2 | awk -F'@' '{print $2}' | awk -F':' '{print $2}')
-    enable_compression=$3
+    ARGS=("$@")                    # make a copy of the array of args
+    enable_compression=${ARGS[-1]} # get last element of the array
+    unset ARGS[${#ARGS[@]}-1]      # remove the last element of the array; cannot pass negative index here
+
+    DEST=${ARGS[-1]}               # last element of the remaining array contains the destination info
+    user=$(echo $DEST | awk -F'@' '{print $1}')
+    ip=$(echo $DEST | awk -F'@' '{print $2}' | awk -F':' '{print $1}')
+    dest=$(echo $DEST | awk -F'@' '{print $2}' | awk -F':' '{print $2}')
+    unset ARGS[${#ARGS[@]}-1]      # remove the last element of the array
+
+    src=("${ARGS[@]}")             # remaining array contains the src files and directories to be transferred
 fi
 
 # sanity checks
@@ -41,10 +47,12 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-if [[ (! -d $src) && (! -f $src) ]]; then
-    echo "ERROR : $src : no such file or directory"
-    exit 1
-fi
+for i in "${src[@]}"; do
+    if [[ (! -d "$i") && (! -f "$i") ]]; then
+        echo "ERROR : $i : no such file or directory"
+        exit 1
+    fi
+done
 
 ssh $user@$ip "ls $dest" &>/dev/null
 if [ $? -ne 0 ]; then
@@ -57,39 +65,43 @@ if [ $? -ne 0 ]; then
 fi
 echo "sanity checks complete..."
 
-# start netcat at destination
-if [ $enable_compression -eq 0 ]; then
-    echo "nc -l -p 12345 | tar xf - -C $dest" > /tmp/nct.sh
-    scp /tmp/nct.sh $user@$ip:/tmp/ &>/dev/null
-    ssh -f $user@$ip "screen -dm -S netcat sh /tmp/nct.sh"
-else
-    echo "nc -l -p 12345 | tar xzf - -C $dest" > /tmp/nct.sh
-    scp /tmp/nct.sh $user@$ip:/tmp/ &>/dev/null
-    ssh -f $user@$ip "screen -dm -S netcat sh /tmp/nct.sh"
-fi
-
-if [ $? -ne 0 ]; then
-    echo "ERROR : unable to start netcat at destination"
-    exit 1
-fi
-echo "started netcat at destination"
-sleep 2
-
 # transfer data
-echo "data transfer in progress..."
-dn=$(dirname "$src")
-bn=$(basename "$src")
-cd "$dn"
+for i in "${src[@]}"; do
+    # start netcat at destination
+    if [ $enable_compression -eq 0 ]; then
+        echo "nc -l -p 12345 | tar xf - -C $dest" > /tmp/nct.sh
+        scp /tmp/nct.sh $user@$ip:/tmp/ &>/dev/null
+        ssh -f $user@$ip "screen -dm -S netcat sh /tmp/nct.sh"
+    else
+        echo "nc -l -p 12345 | tar xzf - -C $dest" > /tmp/nct.sh
+        scp /tmp/nct.sh $user@$ip:/tmp/ &>/dev/null
+        ssh -f $user@$ip "screen -dm -S netcat sh /tmp/nct.sh"
+    fi
 
-if [ $enable_compression -eq 0 ]; then
-    tar cf - "$bn" | pv -s $(du -sb "$bn" | awk '{print $1}') | nc $ip 12345 &>/dev/null
-else
-    tar czf - "$bn" | pv -s $(du -sb "$bn" | awk '{print $1}') | nc $ip 12345 &>/dev/null
-fi
+    if [ $? -ne 0 ]; then
+        echo "ERROR : unable to start netcat at destination"
+        exit 1
+    fi
+    echo "started netcat at destination"
+    sleep 2
 
-if [ $? -ne 0 ]; then
-    echo "ERROR : something went wrong at src"
-    ssh $user@$ip "killall nc; killall screen; killall tar" &>/dev/null
-    exit 1
-fi
-echo "data transfer completed..."
+    # transfer data
+    echo "[$i] data transfer in progress..."
+    dn=$(dirname "$i")
+    bn=$(basename "$i")
+    cd "$dn"
+
+    if [ $enable_compression -eq 0 ]; then
+        tar cf - "$bn" | pv -s $(du -sb "$bn" | awk '{print $1}') | nc $ip 12345 &>/dev/null
+    else
+        tar czf - "$bn" | pv -s $(du -sb "$bn" | awk '{print $1}') | nc $ip 12345 &>/dev/null
+    fi
+
+    if [ $? -ne 0 ]; then
+        echo "ERROR : something went wrong at src"
+        ssh $user@$ip "killall nc; killall screen; killall tar" &>/dev/null
+        exit 1
+    fi
+    echo "[$i] data transfer completed..."
+    sleep 2
+done
