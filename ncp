@@ -5,26 +5,55 @@
 printUsage()
 {
 cat <<EOF
-Usage : `basename $0` [SRC_FILES...] [user@ip_addr:destination_dir] [disable or enable compression (0/1)]
+
+NAME
+    ncp - Super fast netcat + tar file transfer script
+
+SYNOPSIS
+    `basename $0` [OPTIONS] [FILE...] [USER@IP:DEST_DIR]
+
+OPTIONS
+    -c
+        Enable compression during data transfer (suitable for transferring text)
+
+    -h
+        Print command usage and exit
+
 EOF
 }
 
-if [ $# -lt 3 ]; then
-    printUsage
+# default values for options
+enable_compression=0
+
+# get user values for options
+while getopts ":ch" opt; do
+    case $opt in
+        c) enable_compression=1 ;;
+        h) printUsage; exit 0 ;;
+        *) echo -e "\nInvalid option : -${OPTARG}\n"; exit 1 ;;
+    esac
+done
+shift $((OPTIND-1))
+
+# apart from options, there must be minimum two arguments
+if [ $# -lt 2 ]; then
+    echo -e "\nMinimum two arguments required : [FILE...] [USER@IP:DEST_DIR]\n"
     exit 1
-else
-    ARGS=("$@")                    # make a copy of the array of args
-    enable_compression=${ARGS[-1]} # get last element of the array
-    unset ARGS[${#ARGS[@]}-1]      # remove the last element of the array; cannot pass negative index here
-
-    DEST=${ARGS[-1]}               # last element of the remaining array contains the destination info
-    user=$(echo $DEST | awk -F'@' '{print $1}')
-    ip=$(echo $DEST | awk -F'@' '{print $2}' | awk -F':' '{print $1}')
-    dest=$(echo $DEST | awk -F'@' '{print $2}' | awk -F':' '{print $2}')
-    unset ARGS[${#ARGS[@]}-1]      # remove the last element of the array
-
-    src=("${ARGS[@]}")             # remaining array contains the src files and directories to be transferred
 fi
+
+# parse remaining array of arguments
+ARGS=("$@")                    # make a copy of the remaining array of arguments
+DEST=${ARGS[-1]}               # last element of the remaining array contains the destination info
+user=$(echo $DEST | awk -F'@' '{print $1}')
+ip=$(echo $DEST | awk -F'@' '{print $2}' | awk -F':' '{print $1}')
+dest=$(echo $DEST | awk -F'@' '{print $2}' | awk -F':' '{print $2}')
+# check validity of destination info
+if [[ "$user" == "" ]] || [[ "$ip" == "" ]] || [[ "$dest" == "" ]]; then
+    echo -e "\nDestination info (last argument) is incorrect\nShould be of the form [USER@IP:DEST_DIR]\n"
+    exit 1
+fi
+unset ARGS[${#ARGS[@]}-1]      # remove the last element of the array
+src=("${ARGS[@]}")             # remaining array contains the src files and directories to be transferred
 
 # sanity checks
 echo "sanity checks in progress..."
@@ -63,27 +92,34 @@ if [ $? -ne 0 ]; then
     fi
     echo "created directory $dest"
 fi
+
 echo "sanity checks complete..."
+
+nct_transfer_done=false
 
 # transfer data
 for i in "${src[@]}"; do
     # start netcat at destination
     if [ $enable_compression -eq 0 ]; then
-        echo "nc -l -p 12345 | tar xf - -C $dest" > /tmp/nct.sh
-        scp /tmp/nct.sh $user@$ip:/tmp/ &>/dev/null
-        ssh -f $user@$ip "screen -dm -S netcat sh /tmp/nct.sh"
+        $nct_transfer_done || echo "nc -l -p 12345 | tar xf - -C $dest" > /tmp/nct_nocompress.sh
+        $nct_transfer_done || scp /tmp/nct_nocompress.sh $user@$ip:/tmp/ &>/dev/null
+        ssh -f $user@$ip "screen -dm -S netcat sh /tmp/nct_nocompress.sh"
     else
-        echo "nc -l -p 12345 | tar xzf - -C $dest" > /tmp/nct.sh
-        scp /tmp/nct.sh $user@$ip:/tmp/ &>/dev/null
-        ssh -f $user@$ip "screen -dm -S netcat sh /tmp/nct.sh"
+        $nct_transfer_done || echo "nc -l -p 12345 | tar xzf - -C $dest" > /tmp/nct_compress.sh
+        $nct_transfer_done || scp /tmp/nct_compress.sh $user@$ip:/tmp/ &>/dev/null
+        ssh -f $user@$ip "screen -dm -S netcat sh /tmp/nct_compress.sh"
     fi
+
+    nct_transfer_done=true
 
     if [ $? -ne 0 ]; then
         echo "ERROR : unable to start netcat at destination"
+        ssh $user@$ip "killall nc tar" &>/dev/null
+        ssh $user@$ip "screen -S netcat -X quit" &>/dev/null
         exit 1
     fi
     echo "started netcat at destination"
-    sleep 2
+    sleep 1s
 
     # transfer data
     echo "[$i] data transfer in progress..."
@@ -99,9 +135,13 @@ for i in "${src[@]}"; do
 
     if [ $? -ne 0 ]; then
         echo "ERROR : something went wrong at src"
-        ssh $user@$ip "killall nc; killall screen; killall tar" &>/dev/null
+        ssh $user@$ip "killall nc tar" &>/dev/null
+        ssh $user@$ip "screen -S netcat -X quit" &>/dev/null
         exit 1
     fi
     echo "[$i] data transfer completed..."
-    sleep 2
 done
+
+# kill netcat screen session on remote
+ssh $user@$ip "killall nc tar" &>/dev/null
+ssh $user@$ip "screen -S netcat -X quit" &>/dev/null
